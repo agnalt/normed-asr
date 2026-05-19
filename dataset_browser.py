@@ -740,7 +740,12 @@ def main() -> None:
     args = build_parser().parse_args()
     ensure_index(args.dataset_dir, args.index_path, args.rebuild_index)
     app = build_app(args.dataset_dir, args.index_path)
-    app.launch(server_name=args.host, server_port=args.port, share=args.share)
+    app.launch(
+        server_name=args.host,
+        server_port=args.port,
+        share=args.share,
+        allowed_paths=[str(args.dataset_dir.resolve())],
+    )
 
 
 if __name__ == "__main__":
