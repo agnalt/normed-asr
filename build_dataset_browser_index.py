@@ -11,8 +11,8 @@ from tqdm import tqdm
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_DATASET_DIR = BASE_DIR / "artifacts_local/processed/final_dataset"
-DEFAULT_INDEX_PATH = DEFAULT_DATASET_DIR / "browser_index.sqlite"
+INDEX_DIR_NAME = ".dataset_browser"
+INDEX_FILENAME = "browser_index.sqlite"
 TERM_CATEGORIES = ("selected", "common", "excluded")
 
 
@@ -23,18 +23,63 @@ def resolve_path(path: str | Path) -> Path:
     return BASE_DIR / path
 
 
-def iter_metadata_paths(dataset_dir: Path) -> list[Path]:
-    metadata_dir = dataset_dir / "metadata"
+def default_index_path(dataset_dir: Path, index_dir: Path | None = None) -> Path:
+    index_dir = index_dir or dataset_dir / INDEX_DIR_NAME
+    return index_dir / INDEX_FILENAME
+
+
+def metadata_paths_from_directory(metadata_dir: Path) -> list[Path]:
     if not metadata_dir.exists():
         raise FileNotFoundError(f"Missing metadata directory: {metadata_dir}")
     paths = sorted(metadata_dir.glob("chunk_*.jsonl"))
-    if not paths:
-        raise ValueError(f"No metadata shards found under: {metadata_dir}")
-    return paths
+    if paths:
+        return paths
+
+    metadata_file = metadata_dir / "metadata.jsonl"
+    if metadata_file.exists():
+        return [metadata_file]
+
+    nested_metadata_dir = metadata_dir / "metadata"
+    if nested_metadata_dir.exists():
+        return metadata_paths_from_directory(nested_metadata_dir)
+
+    raise ValueError(
+        "No metadata found under "
+        f"{metadata_dir}. Expected chunk_*.jsonl, metadata.jsonl, or metadata/chunk_*.jsonl"
+    )
 
 
-def iter_metadata_rows(dataset_dir: Path) -> tuple[Path, dict[str, Any]]:
-    for path in iter_metadata_paths(dataset_dir):
+def metadata_source_label(source_path: Path, dataset_dir: Path) -> str:
+    try:
+        return str(source_path.relative_to(dataset_dir))
+    except ValueError:
+        return str(source_path)
+
+
+def iter_metadata_paths(dataset_dir: Path, metadata_path: Path | None = None) -> list[Path]:
+    if metadata_path is not None:
+        if metadata_path.is_file():
+            return [metadata_path]
+        if metadata_path.is_dir():
+            return metadata_paths_from_directory(metadata_path)
+        raise FileNotFoundError(f"Metadata path not found: {metadata_path}")
+
+    metadata_dir = dataset_dir / "metadata"
+    if metadata_dir.exists():
+        return metadata_paths_from_directory(metadata_dir)
+
+    metadata_file = dataset_dir / "metadata.jsonl"
+    if metadata_file.exists():
+        return [metadata_file]
+
+    raise FileNotFoundError(
+        "Could not find metadata. Expected either "
+        f"{metadata_dir}/chunk_*.jsonl or {metadata_file}"
+    )
+
+
+def iter_metadata_rows(dataset_dir: Path, metadata_path: Path | None = None) -> tuple[Path, dict[str, Any]]:
+    for path in iter_metadata_paths(dataset_dir, metadata_path):
         with path.open(encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
                 if line.strip():
@@ -121,6 +166,7 @@ def insert_row(
     connection: sqlite3.Connection,
     row: dict[str, Any],
     source_path: Path,
+    dataset_dir: Path,
     term_counts: dict[tuple[str, str], Counter[str]],
 ) -> None:
     sample_id = str(row["id"])
@@ -149,7 +195,7 @@ def insert_row(
             int(bool(row["trimmed_trailing_artifact"])),
             json.dumps(row.get("tts_chunks") or [], ensure_ascii=False),
             json.dumps(used_terms, ensure_ascii=False),
-            str(source_path.relative_to(source_path.parents[1])),
+            metadata_source_label(source_path, dataset_dir),
         ),
     )
 
@@ -173,7 +219,7 @@ def insert_term_counts(
     connection.executemany("INSERT INTO terms VALUES (?, ?, ?, ?)", rows)
 
 
-def build_index(dataset_dir: Path, index_path: Path) -> None:
+def build_index(dataset_dir: Path, index_path: Path, metadata_path: Path | None = None) -> None:
     if not dataset_dir.exists():
         raise FileNotFoundError(f"Dataset directory not found: {dataset_dir}")
 
@@ -185,15 +231,15 @@ def build_index(dataset_dir: Path, index_path: Path) -> None:
     term_counts: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
     with sqlite3.connect(temporary_path) as connection:
         create_schema(connection)
-        paths = iter_metadata_paths(dataset_dir)
+        paths = iter_metadata_paths(dataset_dir, metadata_path)
         total_rows = sum(1 for path in paths for line in path.open(encoding="utf-8") if line.strip())
         with connection:
             for source_path, row in tqdm(
-                iter_metadata_rows(dataset_dir),
+                iter_metadata_rows(dataset_dir, metadata_path),
                 total=total_rows,
                 desc="Indexing dataset",
             ):
-                insert_row(connection, row, source_path, term_counts)
+                insert_row(connection, row, source_path, dataset_dir, term_counts)
             insert_term_counts(connection, term_counts)
             insert_indexes(connection)
         connection.execute("PRAGMA optimize")
@@ -203,15 +249,17 @@ def build_index(dataset_dir: Path, index_path: Path) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build a SQLite index for the local dataset browser.")
-    parser.add_argument("--dataset-dir", type=resolve_path, default=DEFAULT_DATASET_DIR)
-    parser.add_argument("--index-path", type=resolve_path, default=DEFAULT_INDEX_PATH)
+    parser.add_argument("--dataset-dir", type=resolve_path, required=True)
+    parser.add_argument("--metadata", type=resolve_path)
+    parser.add_argument("--index-dir", type=resolve_path)
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
-    build_index(args.dataset_dir, args.index_path)
-    print(f"Wrote browser index: {args.index_path}")
+    index_path = default_index_path(args.dataset_dir, args.index_dir)
+    build_index(args.dataset_dir, index_path, args.metadata)
+    print(f"Wrote browser index: {index_path}")
 
 
 if __name__ == "__main__":

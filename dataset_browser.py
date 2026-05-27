@@ -12,12 +12,10 @@ from typing import Any
 import gradio as gr
 from nltk.stem.snowball import SnowballStemmer
 
-from build_dataset_browser_index import build_index
+from build_dataset_browser_index import build_index, default_index_path
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_DATASET_DIR = BASE_DIR / "artifacts_local/processed/final_dataset"
-DEFAULT_INDEX_PATH = DEFAULT_DATASET_DIR / "browser_index.sqlite"
 TERM_CATEGORIES = ("common", "selected", "excluded")
 CATEGORY_LABELS = {
     "common": "Vanlig begrep",
@@ -581,9 +579,14 @@ def select_result(
     return preview_sample(index_path, dataset_dir, selected_item_id(item_ids, event))
 
 
-def ensure_index(dataset_dir: Path, index_path: Path, rebuild_index: bool) -> None:
+def ensure_index(
+    dataset_dir: Path,
+    index_path: Path,
+    metadata_path: Path | None,
+    rebuild_index: bool,
+) -> None:
     if rebuild_index or not index_path.exists():
-        build_index(dataset_dir, index_path)
+        build_index(dataset_dir, index_path, metadata_path)
 
 
 def initial_results(
@@ -727,8 +730,9 @@ def build_app(dataset_dir: Path, index_path: Path) -> gr.Blocks:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Launch a local Gradio browser for the final dataset.")
-    parser.add_argument("--dataset-dir", type=resolve_path, default=DEFAULT_DATASET_DIR)
-    parser.add_argument("--index-path", type=resolve_path, default=DEFAULT_INDEX_PATH)
+    parser.add_argument("--dataset-dir", type=resolve_path, required=True)
+    parser.add_argument("--metadata", type=resolve_path)
+    parser.add_argument("--index-dir", type=resolve_path)
     parser.add_argument("--rebuild-index", action="store_true")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7860)
@@ -738,8 +742,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    ensure_index(args.dataset_dir, args.index_path, args.rebuild_index)
-    app = build_app(args.dataset_dir, args.index_path)
+    index_path = default_index_path(args.dataset_dir, args.index_dir)
+    ensure_index(args.dataset_dir, index_path, args.metadata, args.rebuild_index)
+    app = build_app(args.dataset_dir, index_path)
     app.launch(
         server_name=args.host,
         server_port=args.port,
